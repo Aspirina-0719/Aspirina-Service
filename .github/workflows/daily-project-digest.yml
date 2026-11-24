@@ -1,0 +1,144 @@
+name: Aspirina - Daily Project Digest
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: classdelta-daily-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate ClassDelta report
+        uses: actions/github-script@v9
+        env:
+          CLASSDELTA_TOKEN: ${{ secrets.CLASSDELTA_TOKEN }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const gh = getOctokit(process.env.CLASSDELTA_TOKEN);
+            const owner = "HuaLaNN-HS";
+            const repo = "ClassDelta";
+
+            if (!process.env.CLASSDELTA_TOKEN) {
+              throw new Error("CLASSDELTA_TOKEN is missing.");
+            }
+
+            const repository = await gh.rest.repos.get({
+              owner,
+              repo
+            });
+
+            const issues = await gh.paginate(
+              gh.rest.issues.listForRepo,
+              {
+                owner,
+                repo,
+                state: "open",
+                per_page: 100
+              }
+            );
+
+            const openIssues = issues.filter(x => !x.pull_request);
+
+            const openPRs = await gh.paginate(
+              gh.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "open",
+                per_page: 100
+              }
+            );
+
+            const since = new Date(
+              Date.now() - 7 * 86400000
+            ).toISOString().slice(0, 10);
+
+            const runs = await gh.rest.actions.listWorkflowRunsForRepo({
+              owner,
+              repo,
+              per_page: 100,
+              created: `>=${since}`
+            });
+
+            const failedRuns = runs.data.workflow_runs.filter(
+              x => x.conclusion === "failure"
+            );
+
+            let latestRelease = null;
+
+            try {
+              const release = await gh.rest.repos.getLatestRelease({
+                owner,
+                repo
+              });
+
+              latestRelease = release.data;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            const safe = value =>
+              String(value ?? "").replace(/[|\r\n]/g, " ");
+
+            const lines = [
+              "# ClassDelta Daily Project Digest",
+              "",
+              `Generated: ${new Date().toISOString()}`,
+              "",
+              "## Repository",
+              "",
+              `- Repository: ${owner}/${repo}`,
+              `- Default branch: ${repository.data.default_branch}`,
+              `- Last pushed: ${repository.data.pushed_at}`,
+              "",
+              "## Current workload",
+              "",
+              `- Open Issues: ${openIssues.length}`,
+              `- Open Pull Requests: ${openPRs.length}`,
+              "",
+              "## Latest Release",
+              "",
+              latestRelease
+                ? `- ${safe(latestRelease.tag_name)} — ${safe(latestRelease.name)}`
+                : "- No published Release found.",
+              "",
+              "## Failed CI runs (last 7 days)",
+              "",
+              `Total failed runs in latest 100 results: ${failedRuns.length}`,
+              ""
+            ];
+
+            for (const run of failedRuns.slice(0, 15)) {
+              lines.push(
+                `- [${safe(run.name)}](${run.html_url}) — ${safe(run.created_at)}`
+              );
+            }
+
+            if (failedRuns.length === 0) {
+              lines.push("No failed workflow runs found.");
+            }
+
+            lines.push(
+              "",
+              "---",
+              "Generated automatically by Aspirina Bot."
+            );
+
+            const fs = require("fs");
+
+            fs.appendFileSync(
+              process.env.GITHUB_STEP_SUMMARY,
+              lines.join("\n") + "\n",
+              "utf8"
+            );
+
+            console.log("Daily digest generated successfully.");
